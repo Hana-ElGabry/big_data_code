@@ -1,0 +1,12 @@
+# Core Spark & Dashboard
+pyspark==3.5.0
+streamlit==1.28.0
+pandas==2.0.0
+
+# Big Data & Spatial Analysis (Rubric Requirement)
+apache-sedona==1.5.0   # For spatial joins
+pyarrow==14.0.0        # For Parquet performance
+shapely==2.0.2         # Geometry backend
+
+# HDFS Connection (Optional but recommended)
+hdfs==2.7.3
