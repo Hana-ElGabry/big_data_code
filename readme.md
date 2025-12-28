@@ -22,40 +22,13 @@ cd code
 # 2. Create the data directories and make sure that the data is in the .gitignore file
 #Here is the data download link:
 [NetMob Dataset](https://drive.google.com/drive/folders/1-VGYqwBsTQxxUTKw2jPoUATbaHUh8MHs?usp=sharing)
-inside the data you will find the 3 databses gps_dataset folder and 2 csv files
-you will have to create 2 folders as shown below:
+# 🚴 NetMob Big Data Project
 
-this is how the folder should look like 
-data/
-    - datanode
-    - namenode
-    - gps_dataset
-    - individuals_dataset.csv
-    - trips_dataset.csv
-
-# 3 Launch the Cluster
-
-```bash
-docker-compose up -d
-```
-
-# 4. upload to hdfs
-```bash
-# Upload Trips
-docker exec -it namenode hdfs dfs -put /hadoop/dfs/name/trips_dataset.csv /raw/
-
-# Upload GPS Traces
-docker exec -it namenode hdfs dfs -mkdir -p /raw/gps_dataset
-docker exec -it namenode hdfs dfs -put /hadoop/dfs/name/gps_dataset/* /raw/gps_dataset/
-```
-
-# 5 Run the Spark Job
-
-```bash
-docker exec -it spark-master /opt/spark/bin/spark-submit \
-  --master spark://spark-master:7077 \
-  --deploy-mode client \
-  --driver-memory 1G \
-  --executor-memory 3G \
-  /app/etl_job.py
+## 1. Setup (First Time Only)
+1. Install Docker Desktop.
+2. Clone this repo.
+3. Put the raw CSV files into `data/gps_dataset/` and `data/trips_dataset.csv`.
+4. Run:
+   ```bash
+   docker-compose up -d
 ```
