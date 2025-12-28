@@ -1,116 +1,184 @@
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, to_timestamp, lit, broadcast, acos, cos, sin, radians
-from pyspark.sql.types import StructType, StructField, StringType, DoubleType, IntegerType
+from pyspark.sql.functions import col, when, trim, to_timestamp, lit
+from pyspark.sql.types import IntegerType, DoubleType, BooleanType
+import time
 
-def main():
-    # 1. Initialize Spark with Tuned Configs for 12GB RAM
-    spark = SparkSession.builder \
-        .appName("NetMob_Research_ETL") \
-        .config("spark.sql.shuffle.partitions", "200") \
-        .config("spark.default.parallelism", "200") \
-        .config("spark.memory.fraction", "0.8") \
-        .getOrCreate()
+# ============================================================
+# SPARK SESSION CONFIGURATION (12GB Memory Budget)
+# ============================================================
+spark = SparkSession.builder \
+    .appName("NetMob25_ETL_Research_Replication") \
+    .master("spark://spark-master:7077") \
+    .config("spark.executor.memory", "3G") \
+    .config("spark.driver.memory", "1G") \
+    .config("spark.sql.shuffle.partitions", "300") \
+    .config("spark.hadoop.fs.defaultFS", "hdfs://namenode:9000") \
+    .getOrCreate()
 
-    print("🚀 Spark Session Started: Replication of 'Unraveling Urban CO2' Pipeline")
+print("=" * 60)
+print("NetMob25 CO2 Research Pipeline - PySpark Replication")
+print(f"Spark Version: {spark.version}")
+print("=" * 60)
 
-    # --- PHASE 1: PROCESS TRIPS METADATA ---
-    print("⏳ Loading and Cleaning Trips Dataset...")
+start_time = time.time()
+
+# ============================================================
+# PHASE 1: LOAD RAW DATA FROM HDFS
+# ============================================================
+print("\n[PHASE 1] Loading raw datasets from HDFS...")
+
+individuals_raw = spark.read.csv(
+    "hdfs://namenode:9000/raw/netmob/individuals_dataset.csv",
+    header=True,
+    inferSchema=True
+)
+
+trips_raw = spark.read.csv(
+    "hdfs://namenode:9000/raw/netmob/trips_dataset.csv",
+    header=True,
+    inferSchema=True
+)
+
+print(f"✓ Raw Individuals: {individuals_raw.count()} rows")
+print(f"✓ Raw Trips: {trips_raw.count()} rows")
+
+# ============================================================
+# PHASE 2: FILTER INDIVIDUALS (GPS_RECORD == True)
+# ============================================================
+print("\n[PHASE 2] Filtering individuals with GPS records...")
+
+# Step 1: Only keep individuals with GPS_RECORD == True
+valid_individuals = individuals_raw \
+    .filter(col("GPS_RECORD") == "True") \
+    .filter(col("ID").isNotNull())
+
+initial_individuals = individuals_raw.count()
+valid_count = valid_individuals.count()
+
+print(f"✓ Original individuals: {initial_individuals}")
+print(f"✓ Individuals with GPS records: {valid_count}")
+print(f"✓ Removed: {initial_individuals - valid_count} ({((initial_individuals - valid_count) / initial_individuals * 100):.1f}%)")
+
+# Extract valid IDs for trip filtering
+valid_ids = valid_individuals.select("ID").distinct()
+
+# ============================================================
+# PHASE 3: FILTER TRIPS (Replicate Pandas Pipeline)
+# ============================================================
+print("\n[PHASE 3] Filtering trips (replicating research pipeline)...")
+
+initial_trips = trips_raw.count()
+print(f"✓ Original trips: {initial_trips}")
+
+# Step 1: Remove NoTrip and NoTraces
+trips_filtered = trips_raw \
+    .filter(~col("ID_Trip_Days").isin(["NoTrip", "NoTraces"]))
     
-    # Define Schema for Trips (Faster than inferring)
-    trips_schema = StructType([
-        StructField("trip_id", StringType(), True),
-        StructField("user_id", StringType(), True),
-        StructField("date", StringType(), True),
-        StructField("no_trip", IntegerType(), True),  # Flag for non-travel days
-        StructField("no_traces", IntegerType(), True), # Flag for missing GPS
-        StructField("main_mode", StringType(), True),
-        # We need coordinates to filter the 75m radius (Paper Section E)
-        StructField("origin_lat", DoubleType(), True),
-        StructField("origin_lon", DoubleType(), True),
-        StructField("dest_lat", DoubleType(), True),
-        StructField("dest_lon", DoubleType(), True)
-    ])
+step1_count = trips_filtered.count()
+print(f"✓ After removing NoTrip/NoTraces: {step1_count} (removed {initial_trips - step1_count})")
 
-    # Read Trips CSV
-    trips_df = spark.read.csv(
-        "hdfs://namenode:9000/raw/trips_dataset.csv", 
-        header=True, 
-        schema=trips_schema
-    )
-
-    # APPLY PAPER FILTERS (Section B)
-    valid_trips_df = trips_df \
-        .filter(col("no_trip") == 0) \
-        .filter(col("no_traces") == 0) \
-        .filter(col("main_mode").isNotNull()) \
-        .select("trip_id", "user_id", "main_mode", "origin_lat", "origin_lon", "dest_lat", "dest_lon")
-
-    print(f"✅ Trips cleaned. Valid Trips Count: {valid_trips_df.count()}")
-
-    # --- PHASE 2: PROCESS RAW GPS TRACES ---
-    print("⏳ Loading 50M GPS Records (This is the heavy part)...")
-
-    # Define Schema for GPS
-    gps_schema = StructType([
-        StructField("timestamp", StringType(), True),
-        StructField("lat", DoubleType(), True),
-        StructField("lon", DoubleType(), True),
-        StructField("valid_signal", StringType(), True), # Quality check column
-        StructField("speed", DoubleType(), True),
-        StructField("user_id", StringType(), True) # Needed to join with trips
-    ])
-
-    # Read all CSVs in the folder at once
-    gps_df = spark.read.csv(
-        "hdfs://namenode:9000/raw/gps_dataset/", 
-        header=True, 
-        schema=gps_schema
-    )
-
-    # FILTER 1: GPS Quality (Paper Section B)
-    # Only keep points where signal is valid (e.g., 'SPS', 'DGPS')
-    clean_gps_df = gps_df.filter(col("valid_signal").isin("SPS", "DGPS"))
-
-    # --- PHASE 3: DISTRIBUTED SPATIAL FILTERING ---
-    # We must join GPS points to Trips to check the "75m distance" rule.
-    # Strategy: BROADCAST the small trips table to all workers.
+# Step 2: Drop rows with missing Main_Mode
+trips_filtered = trips_filtered \
+    .filter(col("Main_Mode").isNotNull())
     
-    print("🔄 Joining GPS with Trips (Broadcast Strategy)...")
+step2_count = trips_filtered.count()
+print(f"✓ After dropping missing Main_Mode: {step2_count} (removed {step1_count - step2_count})")
+
+# Step 3: Remove trips with missing start or end time
+trips_filtered = trips_filtered \
+    .filter(col("Time_O").isNotNull()) \
+    .filter(col("Time_D").isNotNull())
     
-    joined_df = clean_gps_df.join(
-        broadcast(valid_trips_df),
-        on="user_id",
-        how="inner"
-    )
+step3_count = trips_filtered.count()
+print(f"✓ After removing missing timestamps: {step3_count} (removed {step2_count - step3_count})")
 
-    # FILTER 2: Trimming 75m from Origin/Dest (Paper Section E)
-    # Haversine Distance Calculation (Earth Radius ~ 6371km)
-    # We drop points where dist(point, origin) < 0.075km OR dist(point, dest) < 0.075km
+# Step 4: Filter trips to only include those from valid GPS individuals
+trips_clean = trips_filtered \
+    .join(valid_ids, on="ID", how="inner")
     
-    print("📐 Applying 75m Spatial Trimming...")
-    
-    # Helper for Haversine (simplified for performance)
-    def dist_calc(lat1, lon1, lat2, lon2):
-        return acos(
-            sin(radians(lat1)) * sin(radians(lat2)) + 
-            cos(radians(lat1)) * cos(radians(lat2)) * cos(radians(lon2) - radians(lon1))
-        ) * 6371
+final_trips = trips_clean.count()
+print(f"✓ After matching with GPS individuals: {final_trips} (removed {step3_count - final_trips})")
+print(f"✓ Overall retention: {(final_trips / initial_trips * 100):.1f}%")
 
-    final_df = joined_df \
-        .withColumn("dist_to_origin", dist_calc(col("lat"), col("lon"), col("origin_lat"), col("origin_lon"))) \
-        .withColumn("dist_to_dest", dist_calc(col("lat"), col("lon"), col("dest_lat"), col("dest_lon"))) \
-        .filter((col("dist_to_origin") > 0.075) & (col("dist_to_dest") > 0.075))
+# ============================================================
+# PHASE 4: DATA CLEANING & TYPE CASTING
+# ============================================================
+print("\n[PHASE 4] Cleaning and casting data types...")
 
-    # --- PHASE 4: SAVE TO PARQUET ---
-    print("💾 Writing Cleaned Data to Parquet (Snappy Compressed)...")
-    
-    final_df.write \
-        .mode("overwrite") \
-        .partitionBy("main_mode") \
-        .parquet("hdfs://namenode:9000/processed/cleaned_mobility_data.parquet")
+# Clean Individuals
+individuals_clean = valid_individuals \
+    .withColumn("AGE", col("AGE").cast(IntegerType())) \
+    .withColumn("NB_CAR", col("NB_CAR").cast(IntegerType())) \
+    .withColumn("NBPERS_HOUSE", col("NBPERS_HOUSE").cast(IntegerType())) \
+    .withColumn("WEIGHT_INDIV", col("WEIGHT_INDIV").cast(DoubleType())) \
+    .fillna({
+        "NB_CAR": 0,
+        "DRIVING_LICENCE": "Unknown",
+        "NAVIGO_SUB": "No"
+    })
 
-    print("✅ ETL Pipeline Complete. Data is ready for ML/App.")
-    spark.stop()
+# Clean Trips
+trips_clean = trips_clean \
+    .withColumn("Duration", col("Duration").cast(IntegerType())) \
+    .withColumn("Weight_Day", col("Weight_Day").cast(DoubleType())) \
+    .withColumn("Time_O", trim(col("Time_O"))) \
+    .withColumn("Time_D", trim(col("Time_D"))) \
+    .fillna({"Duration": 0})
 
-if __name__ == "__main__":
-    main()
+print(f"✓ Individuals cleaned: {individuals_clean.count()} rows")
+print(f"✓ Trips cleaned: {trips_clean.count()} rows")
+
+# ============================================================
+# PHASE 5: WRITE TO PARQUET (SNAPPY COMPRESSION)
+# ============================================================
+print("\n[PHASE 5] Writing cleaned data to HDFS (Parquet format)...")
+
+individuals_clean.write.mode("overwrite").parquet(
+    "hdfs://namenode:9000/processed/individuals_clean.parquet",
+    compression="snappy"
+)
+print("✓ Individuals saved to /processed/individuals_clean.parquet")
+
+trips_clean.write.mode("overwrite").parquet(
+    "hdfs://namenode:9000/processed/trips_clean.parquet",
+    compression="snappy"
+)
+print("✓ Trips saved to /processed/trips_clean.parquet")
+
+# ============================================================
+# PHASE 6: VALIDATION & SUMMARY STATISTICS
+# ============================================================
+print("\n[PHASE 6] Validation & Summary...")
+
+# Read back to verify
+individuals_final = spark.read.parquet("hdfs://namenode:9000/processed/individuals_clean.parquet")
+trips_final = spark.read.parquet("hdfs://namenode:9000/processed/trips_clean.parquet")
+
+print(f"✓ Final Individuals: {individuals_final.count()} rows")
+print(f"✓ Final Trips: {trips_final.count()} rows")
+
+# Show sample individuals
+print("\n--- Sample Individuals (with GPS) ---")
+individuals_final.select("ID", "AGE", "SEX", "NB_CAR", "NAVIGO_SUB", "GPS_RECORD").show(5, truncate=False)
+
+# Show sample trips
+print("\n--- Sample Trips (filtered & cleaned) ---")
+trips_final.select("ID", "Main_Mode", "Duration", "Area_O", "Area_D").show(5, truncate=False)
+
+# Mode distribution
+print("\n--- Transport Mode Distribution ---")
+trips_final.groupBy("Main_Mode").count().orderBy(col("count").desc()).show(10)
+
+# ============================================================
+# EXECUTION METRICS
+# ============================================================
+end_time = time.time()
+execution_time = end_time - start_time
+
+print("\n" + "=" * 60)
+print("ETL PIPELINE COMPLETED (Research Replication)")
+print(f"Total Execution Time: {execution_time:.2f} seconds")
+print(f"Data Retention: {(final_trips / initial_trips * 100):.1f}% of trips")
+print("=" * 60)
+
+spark.stop()

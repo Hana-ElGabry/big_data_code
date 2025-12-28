@@ -29,6 +29,23 @@ cd code
 2. Clone this repo.
 3. Put the raw CSV files into `data/gps_dataset/` and `data/trips_dataset.csv`.
 4. Run:
-   ```bash
-   docker-compose up -d
+
+# scripts to run in sequnce
+### etl job 1
+```bash
+docker exec -it spark-master bash -c "/spark/bin/spark-submit --master spark://spark-master:7077 --executor-memory 3G --driver-memory 1G /app/etl_job.py"
+
 ```
+### snippit 2
+```bash
+docker exec -it spark-master bash -c "PYSPARK_PYTHON=python3 /spark/bin/spark-submit --master spark://spark-master:7077 --executor-memory 3G --driver-memory 1G /app/inspect_processed.py"
+```
+
+### snippet 3 standardize
+```bash
+docker exec -it spark-master bash -c "PYSPARK_PYTHON=python3 /spark/bin/spark-submit --master spark://spark-master:7077 --executor-memory 3G --driver-memory 1G /app/standardize_modes.py"
+
+```
+
+
+
