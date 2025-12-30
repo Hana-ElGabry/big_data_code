@@ -1,7 +1,7 @@
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
     col, input_file_name, regexp_extract, to_timestamp,
-    lit
+    lit, concat
 )
 from pyspark.sql.types import DoubleType, StringType
 
@@ -70,14 +70,14 @@ trips_time = trips \
     .withColumn(
         "start_ts",
         to_timestamp(
-            col("Date_O").cast("string") + lit(" ") + col("Time_O").cast("string"), 
+            concat(col("Date_O").cast("string"), lit(" "), col("Time_O").cast("string")), 
             "yyyy-MM-dd HH:mm:ss"
         )
     ) \
     .withColumn(
         "end_ts",
         to_timestamp(
-            col("Date_D").cast("string") + lit(" ") + col("Time_D").cast("string"), 
+            concat(col("Date_D").cast("string"), lit(" "), col("Time_D").cast("string")), 
             "yyyy-MM-dd HH:mm:ss"
         )
     ) \
@@ -91,20 +91,32 @@ print(f"Trips with valid timestamps: {trips_time.count()}")
 # ============================================================
 print("\n=== PHASE 3: Attach trip KEY to GPS points ===")
 
+# Create aliases to avoid column ambiguity
+gps_aliased = gps_clean.alias("gps")
+trips_aliased = trips_time.alias("trips")
+
 # Join condition: same ID and GPS time between trip start and end
 join_cond = (
-    (gps_clean.ID == trips_time.ID) &
-    (gps_clean.local_ts >= trips_time.start_ts) &
-    (gps_clean.local_ts <= trips_time.end_ts)
+    (col("gps.ID") == col("trips.ID")) &
+    (col("gps.local_ts") >= col("trips.start_ts")) &
+    (col("gps.local_ts") <= col("trips.end_ts"))
 )
 
-gps_with_trip = gps_clean.join(
-    trips_time.select(
-        "ID", "KEY", "trip_complexity", "Main_Mode_std",
-        "start_ts", "end_ts"
-    ),
+# Join first, then select needed columns
+gps_with_trip = gps_aliased.join(
+    trips_aliased,
     on=join_cond,
     how="left"
+).select(
+    col("gps.ID").alias("ID"),
+    col("gps.local_ts").alias("local_ts"),
+    col("gps.LATITUDE").alias("LATITUDE"),
+    col("gps.LONGITUDE").alias("LONGITUDE"),
+    col("gps.SPEED").alias("SPEED"),
+    col("gps.VALID").alias("VALID"),
+    col("trips.KEY").alias("KEY"),
+    col("trips.trip_complexity").alias("trip_complexity"),
+    col("trips.Main_Mode_std").alias("Main_Mode_std")
 )
 
 total = gps_with_trip.count()
@@ -119,7 +131,7 @@ print(f"GPS points with trip KEY: {assigned} / {total} ({assigned / total * 100:
 print("\n=== PHASE 4: Save results ===")
 
 gps_final = gps_with_trip.select(
-    gps_clean.ID.alias("ID"),
+    col("ID"),
     col("KEY").alias("tripkey"),
     col("local_ts"),
     col("LATITUDE").alias("lat"),
